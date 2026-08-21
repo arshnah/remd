@@ -1,8 +1,9 @@
 # mdpager
 
 Terminal Markdown pager with live reload. Renders headings, lists,
-emphasis, inline code, and syntax-highlighted code blocks, watches the
-file, and re-renders as soon as you save.
+emphasis, inline code, syntax-highlighted code blocks, and tables, watches
+the file, and re-renders as soon as you save. Status bar shows the file
+path and scroll position.
 
 ## Build
 
