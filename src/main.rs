@@ -494,7 +494,7 @@ fn run(
 
 fn main() -> std::io::Result<()> {
     let path = env::args().nth(1).unwrap_or_else(|| {
-        eprintln!("usage: mdpager <file.md>");
+        eprintln!("usage: remd <file.md>");
         std::process::exit(1);
     });
 

@@ -1,4 +1,4 @@
-# mdpager
+# remd
 
 Terminal Markdown pager with live reload. Renders headings, lists,
 emphasis, inline code, syntax-highlighted code blocks, and tables, watches
