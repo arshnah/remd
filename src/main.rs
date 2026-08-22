@@ -549,11 +549,36 @@ fn run(
     Ok(())
 }
 
+fn print_help() {
+    println!("remd, a terminal markdown pager with live reload");
+    println!();
+    println!("usage: remd <file.md>");
+    println!();
+    println!("keys:");
+    println!("  j / down       scroll down one line");
+    println!("  k / up         scroll up one line");
+    println!("  page down      scroll down one page");
+    println!("  page up        scroll up one page");
+    println!("  g              jump to top");
+    println!("  G              jump to bottom");
+    println!("  q              quit");
+    println!();
+    println!("the file is watched and re-rendered automatically on save");
+}
+
 fn main() -> std::io::Result<()> {
-    let path = env::args().nth(1).unwrap_or_else(|| {
+    let arg = env::args().nth(1).unwrap_or_else(|| {
         eprintln!("usage: remd <file.md>");
+        eprintln!("run 'remd --help' for more");
         std::process::exit(1);
     });
+
+    if arg == "-h" || arg == "--help" {
+        print_help();
+        return Ok(());
+    }
+
+    let path = arg;
 
     let ps = SyntaxSet::load_defaults_newlines();
     let ts = ThemeSet::load_defaults();
