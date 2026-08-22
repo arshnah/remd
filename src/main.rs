@@ -10,7 +10,7 @@ use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Par
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::DefaultTerminal;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{FontStyle, Theme, ThemeSet};
@@ -393,11 +393,66 @@ mod tests {
         let text = render("");
         assert!(text.lines.is_empty());
     }
+
+    #[test]
+    fn wrapped_line_count_splits_long_lines() {
+        let text = render(&format!("{}\n", "word ".repeat(40)));
+        let width = 40;
+        let count = wrapped_line_count(&text, width);
+        assert!(
+            count > 1,
+            "expected a long line to wrap into multiple rows at width {width}, got {count}"
+        );
+    }
+
+    #[test]
+    fn long_line_actually_wraps_in_the_rendered_buffer() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let text = render(&format!("{}\n", "abcdefgh ".repeat(20)));
+        let backend = TestBackend::new(30, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                let paragraph = Paragraph::new(text.clone()).wrap(Wrap { trim: false });
+                frame.render_widget(paragraph, area);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let mut rows_with_content = 0;
+        for y in 0..buffer.area.height {
+            let row_text: String = (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol().chars().next().unwrap_or(' '))
+                .collect();
+            if row_text.trim().starts_with("abcdefgh") {
+                rows_with_content += 1;
+            }
+        }
+        assert!(
+            rows_with_content > 1,
+            "expected the long line to wrap across multiple rows in the rendered buffer, only found {rows_with_content}"
+        );
+    }
 }
 
 fn load_and_render(path: &str, ps: &SyntaxSet, theme: &Theme) -> std::io::Result<Text<'static>> {
     let content = fs::read_to_string(path)?;
     Ok(render_markdown(&content, ps, theme))
+}
+
+fn wrapped_line_count(text: &Text, width: u16) -> u16 {
+    let width = width.max(1) as usize;
+    let mut total = 0u16;
+    for line in &text.lines {
+        let len: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+        let rows = if len == 0 { 1 } else { len.div_ceil(width) };
+        total += rows as u16;
+    }
+    total
 }
 
 fn spawn_watcher(path: &str) -> notify::Result<(notify::RecommendedWatcher, mpsc::Receiver<()>)> {
@@ -421,24 +476,27 @@ fn run(
     rx: &mpsc::Receiver<()>,
 ) -> std::io::Result<()> {
     let mut text = load_and_render(path, ps, theme)?;
-    let mut total_lines = text.lines.len() as u16;
     let mut scroll: u16 = 0;
     let mut last_reload: Option<Instant> = None;
 
     loop {
         let mut viewport_height = 0u16;
+        let mut wrapped_lines = 0u16;
         terminal.draw(|frame| {
             let area = frame.area();
             let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
             viewport_height = chunks[0].height;
 
-            let paragraph = Paragraph::new(text.clone()).scroll((scroll, 0));
+            wrapped_lines = wrapped_line_count(&text, chunks[0].width);
+            let paragraph = Paragraph::new(text.clone())
+                .wrap(Wrap { trim: false })
+                .scroll((scroll, 0));
             frame.render_widget(paragraph, chunks[0]);
 
-            let percent = if total_lines <= viewport_height {
+            let percent = if wrapped_lines <= viewport_height {
                 100
             } else {
-                let max = total_lines.saturating_sub(viewport_height).max(1);
+                let max = wrapped_lines.saturating_sub(viewport_height).max(1);
                 (scroll as f32 / max as f32 * 100.0).round() as u16
             };
             let reloaded_tag = match last_reload {
@@ -453,7 +511,7 @@ fn run(
             frame.render_widget(status_line, chunks[1]);
         })?;
 
-        let max_scroll = total_lines.saturating_sub(viewport_height);
+        let max_scroll = wrapped_lines.saturating_sub(viewport_height);
         scroll = scroll.min(max_scroll);
 
         if event::poll(Duration::from_millis(150))?
@@ -484,7 +542,6 @@ fn run(
             while rx.try_recv().is_ok() {}
             if let Ok(new_text) = load_and_render(path, ps, theme) {
                 text = new_text;
-                total_lines = text.lines.len() as u16;
                 last_reload = Some(Instant::now());
             }
         }
