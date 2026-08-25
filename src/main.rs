@@ -443,13 +443,13 @@ mod tests {
     #[test]
     fn obsidian_embed_becomes_real_markdown_image() {
         let out = convert_obsidian_embeds("before ![[Pasted image 20260824190711.png|700]] after");
-        assert_eq!(out, "before ![Pasted image 20260824190711.png](Pasted image 20260824190711.png) after");
+        assert_eq!(out, "before ![Pasted image 20260824190711.png](<Pasted image 20260824190711.png>) after");
     }
 
     #[test]
     fn obsidian_embed_without_width_still_converts() {
         let out = convert_obsidian_embeds("![[cat.png]]");
-        assert_eq!(out, "![cat.png](cat.png)");
+        assert_eq!(out, "![cat.png](<cat.png>)");
     }
 
     #[test]
@@ -546,7 +546,7 @@ fn convert_obsidian_embeds(input: &str) -> String {
         };
         let inner = &after[..end];
         let name = inner.split('|').next().unwrap_or(inner).trim();
-        out.push_str(&format!("![{name}]({name})"));
+        out.push_str(&format!("![{name}](<{name}>)"));
         rest = &after[end + 2..];
     }
     out.push_str(rest);
