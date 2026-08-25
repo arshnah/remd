@@ -441,6 +441,18 @@ mod tests {
     }
 
     #[test]
+    fn obsidian_embed_becomes_real_markdown_image() {
+        let out = convert_obsidian_embeds("before ![[Pasted image 20260824190711.png|700]] after");
+        assert_eq!(out, "before ![Pasted image 20260824190711.png](Pasted image 20260824190711.png) after");
+    }
+
+    #[test]
+    fn obsidian_embed_without_width_still_converts() {
+        let out = convert_obsidian_embeds("![[cat.png]]");
+        assert_eq!(out, "![cat.png](cat.png)");
+    }
+
+    #[test]
     fn registers_local_image_with_resolved_path() {
         let ps = SyntaxSet::load_defaults_newlines();
         let ts = ThemeSet::load_defaults();
@@ -521,8 +533,29 @@ mod tests {
 
 type RenderedDoc = (Text<'static>, Vec<(usize, PathBuf, String)>);
 
+fn convert_obsidian_embeds(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(start) = rest.find("![[") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 3..];
+        let Some(end) = after.find("]]") else {
+            out.push_str(&rest[start..]);
+            rest = "";
+            break;
+        };
+        let inner = &after[..end];
+        let name = inner.split('|').next().unwrap_or(inner).trim();
+        out.push_str(&format!("![{name}]({name})"));
+        rest = &after[end + 2..];
+    }
+    out.push_str(rest);
+    out
+}
+
 fn load_and_render(path: &str, ps: &SyntaxSet, theme: &Theme) -> std::io::Result<RenderedDoc> {
     let content = fs::read_to_string(path)?;
+    let content = convert_obsidian_embeds(&content);
     let base_dir = Path::new(path).parent().unwrap_or(Path::new(".")).to_path_buf();
     Ok(render_markdown(&content, ps, theme, &base_dir))
 }
