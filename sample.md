@@ -29,3 +29,5 @@ Done.
 |:-----|:------:|------:|
 | a    | b      | c     |
 | longer cell | x | 1 |
+
+![a small gradient](sample.png)

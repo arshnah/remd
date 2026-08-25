@@ -1,17 +1,21 @@
+use std::collections::HashMap;
 use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event as CEvent, KeyCode};
 use notify::{RecursiveMode, Watcher};
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::DefaultTerminal;
+use ratatui_image::picker::Picker;
+use ratatui_image::protocol::StatefulProtocol;
+use ratatui_image::StatefulImage;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{FontStyle, Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
@@ -32,10 +36,15 @@ struct MdState {
     table_current_row: Vec<String>,
     in_table_cell: bool,
     table_cell_buf: String,
+    base_dir: PathBuf,
+    in_image: bool,
+    image_dest: String,
+    image_alt: String,
+    images: Vec<(usize, PathBuf, String)>,
 }
 
 impl MdState {
-    fn new() -> Self {
+    fn new(base_dir: PathBuf) -> Self {
         Self {
             lines: Vec::new(),
             current: Vec::new(),
@@ -51,6 +60,11 @@ impl MdState {
             table_current_row: Vec::new(),
             in_table_cell: false,
             table_cell_buf: String::new(),
+            base_dir,
+            in_image: false,
+            image_dest: String::new(),
+            image_alt: String::new(),
+            images: Vec::new(),
         }
     }
 
@@ -164,12 +178,17 @@ fn render_table(header: &[String], rows: &[Vec<String>], alignments: &[Alignment
     lines
 }
 
-fn render_markdown(input: &str, ps: &SyntaxSet, theme: &Theme) -> Text<'static> {
+fn render_markdown(
+    input: &str,
+    ps: &SyntaxSet,
+    theme: &Theme,
+    base_dir: &Path,
+) -> (Text<'static>, Vec<(usize, PathBuf, String)>) {
     let parser = Parser::new_ext(
         input,
         Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES,
     );
-    let mut st = MdState::new();
+    let mut st = MdState::new(base_dir.to_path_buf());
 
     for event in parser {
         match event {
@@ -237,6 +256,11 @@ fn render_markdown(input: &str, ps: &SyntaxSet, theme: &Theme) -> Text<'static> 
                     st.in_table_cell = true;
                     st.table_cell_buf.clear();
                 }
+                Tag::Image { dest_url, .. } => {
+                    st.in_image = true;
+                    st.image_dest = dest_url.to_string();
+                    st.image_alt.clear();
+                }
                 _ => {}
             },
             Event::End(tag_end) => match tag_end {
@@ -282,10 +306,32 @@ fn render_markdown(input: &str, ps: &SyntaxSet, theme: &Theme) -> Text<'static> 
                     st.lines.extend(table_lines);
                     st.lines.push(Line::default());
                 }
+                TagEnd::Image => {
+                    st.in_image = false;
+                    st.flush_line();
+                    let line_index = st.lines.len();
+                    let label = if st.image_alt.is_empty() {
+                        format!("[image: {}]", st.image_dest)
+                    } else {
+                        format!("[image: {}]", st.image_alt)
+                    };
+                    st.lines.push(Line::from(Span::styled(
+                        label,
+                        Style::default().fg(Color::Magenta),
+                    )));
+                    st.lines.push(Line::default());
+
+                    if !st.image_dest.starts_with("http://") && !st.image_dest.starts_with("https://") {
+                        let path = st.base_dir.join(&st.image_dest);
+                        st.images.push((line_index, path, std::mem::take(&mut st.image_alt)));
+                    }
+                }
                 _ => {}
             },
             Event::Text(text) => {
-                if st.in_table_cell {
+                if st.in_image {
+                    st.image_alt.push_str(&text);
+                } else if st.in_table_cell {
                     st.table_cell_buf.push_str(&text);
                 } else if st.in_code_block {
                     st.code_buffer.push_str(&text);
@@ -328,7 +374,7 @@ fn render_markdown(input: &str, ps: &SyntaxSet, theme: &Theme) -> Text<'static> 
     if !st.current.is_empty() {
         st.flush_line();
     }
-    Text::from(st.lines)
+    (Text::from(st.lines), st.images)
 }
 
 #[cfg(test)]
@@ -339,7 +385,7 @@ mod tests {
         let ps = SyntaxSet::load_defaults_newlines();
         let ts = ThemeSet::load_defaults();
         let theme = &ts.themes["base16-ocean.dark"];
-        render_markdown(input, &ps, theme)
+        render_markdown(input, &ps, theme, Path::new(".")).0
     }
 
     fn lines_as_strings(text: &Text<'static>) -> Vec<String> {
@@ -395,6 +441,40 @@ mod tests {
     }
 
     #[test]
+    fn registers_local_image_with_resolved_path() {
+        let ps = SyntaxSet::load_defaults_newlines();
+        let ts = ThemeSet::load_defaults();
+        let theme = &ts.themes["base16-ocean.dark"];
+        let (text, images) = render_markdown(
+            "![a cat](cat.png)\n",
+            &ps,
+            theme,
+            Path::new("/docs"),
+        );
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].1, Path::new("/docs/cat.png"));
+        assert_eq!(images[0].2, "a cat");
+        assert!(text.lines.iter().any(|l| l
+            .spans
+            .iter()
+            .any(|s| s.content.contains("a cat"))));
+    }
+
+    #[test]
+    fn does_not_register_remote_image_urls() {
+        let ps = SyntaxSet::load_defaults_newlines();
+        let ts = ThemeSet::load_defaults();
+        let theme = &ts.themes["base16-ocean.dark"];
+        let (_, images) = render_markdown(
+            "![remote](https://example.com/cat.png)\n",
+            &ps,
+            theme,
+            Path::new("/docs"),
+        );
+        assert!(images.is_empty(), "remote image URLs shouldn't be treated as local files to decode");
+    }
+
+    #[test]
     fn wrapped_line_count_splits_long_lines() {
         let text = render(&format!("{}\n", "word ".repeat(40)));
         let width = 40;
@@ -439,20 +519,33 @@ mod tests {
     }
 }
 
-fn load_and_render(path: &str, ps: &SyntaxSet, theme: &Theme) -> std::io::Result<Text<'static>> {
+type RenderedDoc = (Text<'static>, Vec<(usize, PathBuf, String)>);
+
+fn load_and_render(path: &str, ps: &SyntaxSet, theme: &Theme) -> std::io::Result<RenderedDoc> {
     let content = fs::read_to_string(path)?;
-    Ok(render_markdown(&content, ps, theme))
+    let base_dir = Path::new(path).parent().unwrap_or(Path::new(".")).to_path_buf();
+    Ok(render_markdown(&content, ps, theme, &base_dir))
+}
+
+fn line_wrapped_rows(line: &Line, width: usize) -> u16 {
+    let len: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+    (if len == 0 { 1 } else { len.div_ceil(width) }) as u16
 }
 
 fn wrapped_line_count(text: &Text, width: u16) -> u16 {
     let width = width.max(1) as usize;
-    let mut total = 0u16;
+    text.lines.iter().map(|l| line_wrapped_rows(l, width)).sum()
+}
+
+fn wrapped_row_starts(text: &Text, width: u16) -> Vec<u16> {
+    let width = width.max(1) as usize;
+    let mut starts = Vec::with_capacity(text.lines.len());
+    let mut acc = 0u16;
     for line in &text.lines {
-        let len: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
-        let rows = if len == 0 { 1 } else { len.div_ceil(width) };
-        total += rows as u16;
+        starts.push(acc);
+        acc += line_wrapped_rows(line, width);
     }
-    total
+    starts
 }
 
 fn spawn_watcher(path: &str) -> notify::Result<(notify::RecommendedWatcher, mpsc::Receiver<()>)> {
@@ -468,6 +561,8 @@ fn spawn_watcher(path: &str) -> notify::Result<(notify::RecommendedWatcher, mpsc
     Ok((watcher, rx))
 }
 
+const MAX_IMAGE_ROWS: u16 = 15;
+
 fn run(
     terminal: &mut DefaultTerminal,
     path: &str,
@@ -475,9 +570,11 @@ fn run(
     theme: &Theme,
     rx: &mpsc::Receiver<()>,
 ) -> std::io::Result<()> {
-    let mut text = load_and_render(path, ps, theme)?;
+    let (mut text, mut images) = load_and_render(path, ps, theme)?;
     let mut scroll: u16 = 0;
     let mut last_reload: Option<Instant> = None;
+    let picker = Picker::from_query_stdio().ok();
+    let mut image_cache: HashMap<PathBuf, Option<StatefulProtocol>> = HashMap::new();
 
     loop {
         let mut viewport_height = 0u16;
@@ -487,11 +584,41 @@ fn run(
             let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
             viewport_height = chunks[0].height;
 
+            let row_starts = wrapped_row_starts(&text, chunks[0].width);
             wrapped_lines = wrapped_line_count(&text, chunks[0].width);
+
             let paragraph = Paragraph::new(text.clone())
                 .wrap(Wrap { trim: false })
                 .scroll((scroll, 0));
             frame.render_widget(paragraph, chunks[0]);
+
+            if let Some(picker) = &picker {
+                for (line_index, img_path, _alt) in &images {
+                    let Some(&row_start) = row_starts.get(*line_index) else { continue };
+                    if row_start < scroll || row_start >= scroll + viewport_height {
+                        continue;
+                    }
+                    let protocol = image_cache.entry(img_path.clone()).or_insert_with(|| {
+                        image::ImageReader::open(img_path)
+                            .ok()
+                            .and_then(|r| r.decode().ok())
+                            .map(|img| picker.new_resize_protocol(img))
+                    });
+                    let Some(protocol) = protocol else { continue };
+                    let visual_row = row_start - scroll;
+                    let height = MAX_IMAGE_ROWS.min(viewport_height.saturating_sub(visual_row));
+                    if height == 0 {
+                        continue;
+                    }
+                    let rect = Rect {
+                        x: chunks[0].x,
+                        y: chunks[0].y + visual_row,
+                        width: chunks[0].width,
+                        height,
+                    };
+                    frame.render_stateful_widget(StatefulImage::<StatefulProtocol>::default(), rect, protocol);
+                }
+            }
 
             let percent = if wrapped_lines <= viewport_height {
                 100
@@ -540,8 +667,10 @@ fn run(
         if rx.try_recv().is_ok() {
             std::thread::sleep(Duration::from_millis(150));
             while rx.try_recv().is_ok() {}
-            if let Ok(new_text) = load_and_render(path, ps, theme) {
+            if let Ok((new_text, new_images)) = load_and_render(path, ps, theme) {
                 text = new_text;
+                images = new_images;
+                image_cache.clear();
                 last_reload = Some(Instant::now());
             }
         }
