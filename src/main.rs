@@ -573,7 +573,13 @@ fn run(
     let (mut text, mut images) = load_and_render(path, ps, theme)?;
     let mut scroll: u16 = 0;
     let mut last_reload: Option<Instant> = None;
-    let picker = Picker::from_query_stdio().ok();
+    let picker = Picker::from_query_stdio().ok().map(|mut p| {
+        let is_kitty = std::env::var("KITTY_WINDOW_ID").is_ok() || std::env::var("TERM").map(|t| t.contains("kitty")).unwrap_or(false);
+        if is_kitty {
+            p.set_protocol_type(ratatui_image::picker::ProtocolType::Kitty);
+        }
+        p
+    });
     let mut image_cache: HashMap<PathBuf, Option<StatefulProtocol>> = HashMap::new();
 
     loop {
